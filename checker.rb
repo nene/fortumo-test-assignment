@@ -14,12 +14,11 @@ class MailNotifier
 end
 
 class StatusHandler
-  TIMEOUT_WAITING_TIME = 1
-
-  def initialize
+  def initialize(conf)
     @previous_status = '200'
     @should_notify = false
     @last_non_timeout_time = Time.now
+    @timeout_reporting_delay = conf[:timeout_reporting_delay]
   end
 
   def update(status)
@@ -27,7 +26,7 @@ class StatusHandler
       @should_notify = true
       @last_non_timeout_time = Time.now
     elsif status.is_a?(Timeout::Error)
-      @should_notify = Time.now > @last_non_timeout_time + TIMEOUT_WAITING_TIME
+      @should_notify = Time.now > @last_non_timeout_time + @timeout_reporting_delay
     else
       @should_notify = false
     end
@@ -42,18 +41,21 @@ end
 
 
 class StatusReporter
-  EXPECTED_CONTENT = /Hello worlds/i
+  def initialize(conf)
+    @notifiers = []
+    @status_handler = StatusHandler.new(conf)
+    @expected_content = conf[:expected_content]
+  end
 
-  def initialize(*notifiers)
-    @notifiers = notifiers
-    @status_handler = StatusHandler.new
+  def add_notifiers(notifiers)
+    @notifiers += notifiers
   end
 
   def report(res)
     case res
     when Net::HTTPResponse
       if res.code == '200'
-        if res.body =~ EXPECTED_CONTENT
+        if res.body =~ @expected_content
           notify(res.code, "Server is back up", "Hurrey!")
         else
           notify(:blank, "Blank page", "Totally empty!")
@@ -77,19 +79,29 @@ class StatusReporter
   end
 end
 
+class StatusMonitor
+  def initialize(conf)
+    @status_reporter = StatusReporter.new(conf)
+    @status_reporter.add_notifiers([MailNotifier.new, SmsNotifier.new])
 
-notifiers = [MailNotifier.new, SmsNotifier.new]
-status_reporter = StatusReporter.new(*notifiers)
-
-http = Net::HTTP.new('localhost', 2000)
-http.read_timeout = 1
-
-while true
-  begin
-    res = http.request_get('/')
-    status_reporter.report(res)
-  rescue StandardError => err
-    status_reporter.report(err)
+    @http = Net::HTTP.new(conf[:server], conf[:port])
+    @http.read_timeout = conf[:request_timeout]
   end
-  sleep 1
+
+  def start
+    while true
+      begin
+        res = @http.request_get('/')
+        @status_reporter.report(res)
+      rescue StandardError => err
+        @status_reporter.report(err)
+      end
+      sleep 1
+    end
+  end
 end
+
+require './conf.rb'
+
+StatusMonitor.new(CONF).start
+
