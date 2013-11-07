@@ -31,7 +31,7 @@ loop do
 
   response = "Hello World!\n"
 
-  # sleep 20
+  # sleep 2
 
   # We need to include the Content-Type and Content-Length headers
   # to let the client know the size and type of data

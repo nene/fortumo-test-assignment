@@ -1,42 +1,95 @@
 require 'net/http'
 
-class ErrorMailer
-  def initialize
-    @previous_status = '200'
-  end
-
-  def mail(status, title, msg)
-    return if @previous_status == status
-
-    puts title
-    puts "    " + msg
-
-    @previous_status = status
-  end
-
-  def status=(status)
-    @previous_status = status
+class SmsNotifier
+  def notify(status, title, msg)
+    puts "SMS: #{title} #{msg}"
   end
 end
 
-err_mailer = ErrorMailer.new
+class MailNotifier
+  def notify(status, title, msg)
+    puts title
+    puts "    " + msg
+  end
+end
+
+class StatusHandler
+  TIMEOUT_WAITING_TIME = 1
+
+  def initialize
+    @previous_status = '200'
+    @should_notify = false
+    @last_non_timeout_time = Time.now
+  end
+
+  def update(status)
+    if @previous_status != status && !status.is_a?(Timeout::Error)
+      @should_notify = true
+      @last_non_timeout_time = Time.now
+    elsif status.is_a?(Timeout::Error)
+      @should_notify = Time.now > @last_non_timeout_time + TIMEOUT_WAITING_TIME
+    else
+      @should_notify = false
+    end
+    @previous_status = status
+    self
+  end
+
+  def should_notify?
+    @should_notify
+  end
+end
+
+
+class StatusReporter
+  EXPECTED_CONTENT = /Hello worlds/i
+
+  def initialize(*notifiers)
+    @notifiers = notifiers
+    @status_handler = StatusHandler.new
+  end
+
+  def report(res)
+    case res
+    when Net::HTTPResponse
+      if res.code == '200'
+        if res.body =~ EXPECTED_CONTENT
+          notify(res.code, "Server is back up", "Hurrey!")
+        else
+          notify(:blank, "Blank page", "Totally empty!")
+        end
+      else
+        notify(res.code, "Server is down", "Error: #{res.code}")
+      end
+    when Timeout::Error
+      notify(res, "Server is does not respond", "Error: Timeout")
+    when Errno::ECONNREFUSED
+      notify(res, "Server is down", "Error: Connection refused")
+    when StandardError
+      notify(res, "Error when checking server status", "Error: #{res.inspect}")
+    end
+  end
+
+  def notify(status, title, msg)
+    if @status_handler.update(status).should_notify?
+      @notifiers.each {|n| n.notify(status, title, msg) }
+    end
+  end
+end
+
+
+notifiers = [MailNotifier.new, SmsNotifier.new]
+status_reporter = StatusReporter.new(*notifiers)
+
 http = Net::HTTP.new('localhost', 2000)
 http.read_timeout = 1
 
 while true
   begin
     res = http.request_get('/')
-    if res.code == '200'
-      err_mailer.mail(res.code, "Server is back up", "Hurrey!")
-    else
-      err_mailer.mail(res.code, "Server is down", "Error: #{res.code}")
-    end
-  rescue Timeout::Error => err
-    err_mailer.mail(err, "Server is does not respond", "Error: Timeout")
-  rescue Errno::ECONNREFUSED => err
-    err_mailer.mail(err, "Server is down", "Error: Connection refused")
+    status_reporter.report(res)
   rescue StandardError => err
-    err_mailer.mail(err, "Error when checking server status", "Error: #{err.inspect}")
+    status_reporter.report(err)
   end
   sleep 1
 end
