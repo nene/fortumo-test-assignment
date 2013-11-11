@@ -100,5 +100,5 @@ checker = StatusChecker.new(CONF)
 
 while true
   reporter.report(checker.check('/'))
-  sleep 1
+  sleep CONF[:checking_interval]
 end
