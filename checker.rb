@@ -1,36 +1,37 @@
 require 'net/http'
+require 'ostruct'
 
 class SmsNotifier
-  def notify(status, title, msg)
-    puts "SMS: #{title} #{msg}"
+  def notify(status)
+    puts "SMS: #{status.title} #{status.msg}"
   end
 end
 
 class MailNotifier
-  def notify(status, title, msg)
-    puts title
-    puts "    " + msg
+  def notify(status)
+    puts "Email: #{status.title}"
+    puts "       #{status.msg}"
   end
 end
 
 class StatusHandler
   def initialize(conf)
-    @previous_status = '200'
+    @previous_status = :ok
     @should_notify = false
     @last_non_timeout_time = Time.now
     @timeout_reporting_delay = conf[:timeout_reporting_delay]
   end
 
-  def update(status)
-    if @previous_status != status && !status.is_a?(Timeout::Error)
+  def update(status_code)
+    if @previous_status != status_code && status_code != :timeout
       @should_notify = true
       @last_non_timeout_time = Time.now
-    elsif status.is_a?(Timeout::Error)
+    elsif status_code == :timeout
       @should_notify = Time.now > @last_non_timeout_time + @timeout_reporting_delay
     else
       @should_notify = false
     end
-    @previous_status = status
+    @previous_status = status_code
     self
   end
 
@@ -51,57 +52,53 @@ class StatusReporter
     @notifiers += notifiers
   end
 
-  def report(res)
-    case res
-    when Net::HTTPResponse
-      if res.code == '200'
-        if res.body =~ @expected_content
-          notify(res.code, "Server is back up", "Hurrey!")
-        else
-          notify(:blank, "Blank page", "Totally empty!")
-        end
-      else
-        notify(res.code, "Server is down", "Error: #{res.code}")
-      end
-    when Timeout::Error
-      notify(res, "Server is does not respond", "Error: Timeout")
-    when Errno::ECONNREFUSED
-      notify(res, "Server is down", "Error: Connection refused")
-    when StandardError
-      notify(res, "Error when checking server status", "Error: #{res.inspect}")
-    end
-  end
-
-  def notify(status, title, msg)
-    if @status_handler.update(status).should_notify?
-      @notifiers.each {|n| n.notify(status, title, msg) }
+  def report(status)
+    if @status_handler.update(status.code).should_notify?
+      @notifiers.each {|n| n.notify(status) }
     end
   end
 end
 
-class StatusMonitor
+class StatusChecker
   def initialize(conf)
-    @status_reporter = StatusReporter.new(conf)
-    @status_reporter.add_notifiers([MailNotifier.new, SmsNotifier.new])
-
     @http = Net::HTTP.new(conf[:server], conf[:port])
     @http.read_timeout = conf[:request_timeout]
   end
 
-  def start
-    while true
-      begin
-        res = @http.request_get('/')
-        @status_reporter.report(res)
-      rescue StandardError => err
-        @status_reporter.report(err)
+  def check(url)
+    begin
+      res = @http.request_get(url)
+      if res.code == '200'
+        if res.body =~ @expected_content
+          status(:ok, "Server is back up", "Hurrey!")
+        else
+          status(:blank, "Blank page", "Totally empty!")
+        end
+      else
+        status(res.code.to_i, "Server is down", "Error: #{res.code}")
       end
-      sleep 1
+    rescue Timeout::Error => err
+      status(:timeout, "Server is does not respond", "Error: Timeout")
+    rescue Errno::ECONNREFUSED => err
+      status(:connection_refused, "Server is down", "Error: Connection refused")
+    rescue StandardError => err
+      status(:unknown, "Error when checking server status", "Error: #{err.inspect}")
     end
+  end
+
+  def status(code, title, msg)
+    OpenStruct.new(:code => code, :title => title, :msg => msg)
   end
 end
 
 require './conf.rb'
 
-StatusMonitor.new(CONF).start
+reporter = StatusReporter.new(CONF)
+reporter.add_notifiers([MailNotifier.new, SmsNotifier.new])
 
+checker = StatusChecker.new(CONF)
+
+while true
+  reporter.report(checker.check('/'))
+  sleep 1
+end
