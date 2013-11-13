@@ -15,37 +15,42 @@ class MailNotifier
 end
 
 class StatusHandler
-  def initialize(conf)
-    @previous_status = :ok
+  def initialize
+    @prev_status = OpenStruct.new(:code => :ok, :delay => 0)
     @should_notify = false
-    @last_non_timeout_time = Time.now
-    @timeout_reporting_delay = conf[:timeout_reporting_delay]
+    @prev_change = Time.now
   end
 
-  def update(status_code)
-    if @previous_status != status_code && status_code != :timeout
-      @should_notify = true
-      @last_non_timeout_time = Time.now
-    elsif status_code == :timeout
-      @should_notify = Time.now > @last_non_timeout_time + @timeout_reporting_delay
+  def update(new_status)
+    if @prev_status.code != new_status.code
+      # When status changed. Remember the status and time of the change.
+      @prev_status = new_status
+      @prev_change = Time.now
+      # Notify immediately when status has no delay.
+      @should_notify = (new_status.delay == 0) ? true : :pending
+    elsif @should_notify == :pending
+      # When status didn't change and reporting of the previous change
+      # is still pending, notify in case enough time has passed.
+      @should_notify = true if Time.now > @prev_change + new_status.delay
     else
+      # Status didn't change, and we have already reported the
+      # previous change.  Do nothing until next status change.
       @should_notify = false
     end
-    @previous_status = status_code
+
     self
   end
 
   def should_notify?
-    @should_notify
+    @should_notify == true
   end
 end
 
 
 class StatusReporter
-  def initialize(conf)
+  def initialize
     @notifiers = []
-    @status_handler = StatusHandler.new(conf)
-    @expected_content = conf[:expected_content]
+    @status_handler = StatusHandler.new
   end
 
   def add_notifiers(notifiers)
@@ -53,7 +58,7 @@ class StatusReporter
   end
 
   def report(status)
-    if @status_handler.update(status.code).should_notify?
+    if @status_handler.update(status).should_notify?
       @notifiers.each {|n| n.notify(status) }
     end
   end
@@ -63,6 +68,8 @@ class StatusChecker
   def initialize(conf)
     @http = Net::HTTP.new(conf[:server], conf[:port])
     @http.read_timeout = conf[:request_timeout]
+    @expected_content = conf[:expected_content]
+    @timeout_reporting_delay = conf[:timeout_reporting_delay]
   end
 
   def check(url)
@@ -78,7 +85,7 @@ class StatusChecker
         status(res.code.to_i, "Server is down", "Error: #{res.code}")
       end
     rescue Timeout::Error => err
-      status(:timeout, "Server is does not respond", "Error: Timeout")
+      status(:timeout, "Server does not respond", "Error: Timeout", @timeout_reporting_delay)
     rescue Errno::ECONNREFUSED => err
       status(:connection_refused, "Server is down", "Error: Connection refused")
     rescue StandardError => err
@@ -86,14 +93,14 @@ class StatusChecker
     end
   end
 
-  def status(code, title, msg)
-    OpenStruct.new(:code => code, :title => title, :msg => msg)
+  def status(code, title, msg, delay=0)
+    OpenStruct.new(:code => code, :title => title, :msg => msg, :delay => delay)
   end
 end
 
 require './conf.rb'
 
-reporter = StatusReporter.new(CONF)
+reporter = StatusReporter.new
 reporter.add_notifiers([MailNotifier.new, SmsNotifier.new])
 
 checker = StatusChecker.new(CONF)
